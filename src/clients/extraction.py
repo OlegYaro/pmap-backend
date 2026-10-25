@@ -32,6 +32,9 @@ class ExtractionClient:
     async def list_territories(self) -> list[dict[str, Any]]:
         return await self._get("/territories")
 
+    async def price_stats(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        return await self._get("/analytics/stats", params)
+
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         try:
             response = await self._http.get(path, params=params)
