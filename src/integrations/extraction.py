@@ -17,7 +17,7 @@ class ExtractionError(Exception):
         self.detail = detail
 
 
-class ExtractionClient:
+class ExtractionHttpClient:
     """Calls the Extraction API, which owns the transactions."""
 
     def __init__(self, http: httpx.AsyncClient) -> None:
@@ -58,7 +58,7 @@ def _headers() -> dict[str, str]:
     return {"X-API-Key": settings.EXTRACTION_API_KEY.get_secret_value()}
 
 
-extraction_client = ExtractionClient(
+extraction_http_client = ExtractionHttpClient(
     httpx.AsyncClient(
         base_url=settings.EXTRACTION_URL,
         headers=_headers(),

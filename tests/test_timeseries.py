@@ -2,8 +2,8 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from api.routers.analytics import first_provisional_month
 from core import settings
+from core.dates import first_provisional_month
 
 STATS_URL = f"{settings.EXTRACTION_URL}/analytics/stats"
 

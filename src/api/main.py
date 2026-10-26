@@ -3,8 +3,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from api.routers.router import api_router
-from clients.extraction import ExtractionError
 from core import setup_logging
+from integrations.extraction import ExtractionError
 from jobs.broker import broker
 
 setup_logging()
