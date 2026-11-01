@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     EXTRACTION_URL: str = "http://localhost:8000"
     EXTRACTION_API_KEY: SecretStr | None = None
     EXTRACTION_TIMEOUT_S: float = 30.0
+    S3_BUCKET: str | None = None
+    S3_REGION: str = "eu-north-1"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
