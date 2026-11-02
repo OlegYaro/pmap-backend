@@ -1,6 +1,7 @@
 import csv
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ class ExportService:
     @staticmethod
     async def export_transactions(params: dict[str, Any]) -> str:
         """Write all filtered transactions to a CSV file, put it to S3 and return its key."""
-        key = f"exports/{uuid.uuid4()}.csv"
+        key = f"exports/{datetime.now(timezone).date()}/{uuid.uuid4()}.csv"
         with tempfile.NamedTemporaryFile("w", suffix=".csv", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(file, COLUMNS)
             writer.writeheader()
