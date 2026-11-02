@@ -22,6 +22,7 @@ packages = [
     { include = "core", from = "src" },
     { include = "jobs", from = "src" },
     { include = "integrations", from = "src" },
+    { include = "services", from = "src" },
     { include = "api", from = "src" },
 ]
 

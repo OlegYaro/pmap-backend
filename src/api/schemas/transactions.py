@@ -92,3 +92,31 @@ class TransactionResponse(BaseModel):
             "price_property": attributes.get("nier_cena_brutto"),
             "price_transaction": attributes.get("tran_cena_brutto"),
         }
+
+
+class TransactionCreate(BaseModel):
+    """A transaction entered by hand Extraction stores the values as they are so they are checked here."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    external_building_id: str | None = None
+    transaction_date: date | None = None
+    price_premises: float | None = Field(default=None, gt=0)
+    area_usable: float | None = Field(default=None, gt=0)
+    rooms: int | None = Field(default=None, ge=1)
+    floor: int | None = None
+    market_type: str | None = None
+    function: str | None = None
+    address: str | None = None
+    powiat_code: str = Field(pattern=r"^\d{4}$")
+    gmina_code: str | None = Field(default=None, pattern=r"^\d{7}$")
+    city_name: str | None = None
+    district_name: str | None = None
+    exclusion_reason: str | None = None
+
+
+class TransactionUpdate(TransactionCreate):
+    """Fields to change by hand accept_registry hands the record back to the registry."""
+
+    powiat_code: str | None = Field(default=None, pattern=r"^\d{4}$")
+    accept_registry: bool = False

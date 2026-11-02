@@ -11,8 +11,6 @@ class Settings(BaseSettings):
     EXTRACTION_URL: str = "http://localhost:8000"
     EXTRACTION_API_KEY: SecretStr | None = None
     EXTRACTION_TIMEOUT_S: float = 30.0
-    MIN_SAMPLE: int = 10
-    PROVISIONAL_MONTHS: int = 2
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

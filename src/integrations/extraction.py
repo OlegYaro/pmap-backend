@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 
 class ExtractionError(Exception):
-    """Extraction did not give the data; status_code is what Backend answers its own client."""
+    """Extraction did not give the data status_code is what Backend answers its own client."""
 
     def __init__(self, status_code: int, detail: str) -> None:
         super().__init__(detail)
@@ -18,26 +18,48 @@ class ExtractionError(Exception):
 
 
 class ExtractionHttpClient:
-    """Calls the Extraction API, which owns the transactions."""
+    """Calls the Extraction API which owns the transactions."""
 
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
 
     async def list_transactions(self, params: dict[str, Any]) -> list[dict[str, Any]]:
-        return await self._get("/transactions", params)
+        return await self._request("GET", "/transactions", params=params)
 
     async def get_transaction(self, transaction_id: int) -> dict[str, Any]:
-        return await self._get(f"/transactions/{transaction_id}")
+        return await self._request("GET", f"/transactions/{transaction_id}")
 
     async def list_territories(self) -> list[dict[str, Any]]:
-        return await self._get("/territories")
+        return await self._request("GET", "/territories")
 
     async def price_stats(self, params: dict[str, Any]) -> list[dict[str, Any]]:
-        return await self._get("/analytics/stats", params)
+        return await self._request("GET", "/analytics/stats", params=params)
 
-    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def create_transaction(self, data: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", "/transactions", json=data)
+
+    async def update_transaction(self, transaction_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("PATCH", f"/transactions/{transaction_id}", json=data)
+
+    async def list_runs(self, limit: int) -> list[dict[str, Any]]:
+        return await self._request("GET", "/runs", params={"limit": limit})
+
+    async def get_run(self, run_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/runs/{run_id}")
+
+    async def start_run(self, territory_code: str | None) -> dict[str, Any]:
+        params = {"territory_code": territory_code} if territory_code else None
+        return await self._request("POST", "/runs", params=params)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
         try:
-            response = await self._http.get(path, params=params)
+            response = await self._http.request(method, path, params=params, json=json)
         except httpx.HTTPError as error:
             log.warning("Extraction is unavailable path=%s error=%r", path, error)
             raise ExtractionError(502, "Extraction is unavailable") from error
