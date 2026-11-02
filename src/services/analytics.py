@@ -31,13 +31,13 @@ class AnalyticsService:
             count=total["count"],
             previous_median=previous_total["median"],
             previous_count=previous_total["count"],
-            change_pct=_change_pct(total["median"], previous_total["median"]),
+            change_pct=AnalyticsService._change_pct(total["median"], previous_total["median"]),
             rooms=[DistributionRow(group=row["group"], count=row["count"]) for row in rooms],
             floors=[DistributionRow(group=row["group"], count=row["count"]) for row in floors],
         )
 
-
-def _change_pct(current: float | None, previous: float | None) -> float | None:
-    if current is None or not previous:
-        return None
-    return round((current / previous - 1) * 100, 1)
+    @staticmethod
+    def _change_pct(current: float | None, previous: float | None) -> float | None:
+        if current is None or not previous:
+            return None
+        return round((current / previous - 1) * 100, 1)

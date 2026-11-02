@@ -12,7 +12,7 @@ class ExtractionError(Exception):
     """Extraction did not give the data status_code is what Backend answers its own client."""
 
     def __init__(self, status_code: int, detail: str) -> None:
-        super().__init__(detail)
+        super().__init__(status_code, detail)
         self.status_code = status_code
         self.detail = detail
 
