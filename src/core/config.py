@@ -6,7 +6,10 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     REDIS_URL: str
+    DB_URL: str
     LOG_LEVEL: str = "INFO"
+    # Backend issues the tokens; the API Gateway authorizer checks them with the same secret.
+    JWT_SECRET: SecretStr
     # Extraction API: Backend reads transactions and starts runs through it.
     EXTRACTION_URL: str = "http://localhost:8000"
     EXTRACTION_API_KEY: SecretStr | None = None

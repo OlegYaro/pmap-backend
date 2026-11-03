@@ -1,5 +1,25 @@
-# Ports differ from Extraction (6379, 8000), so both run side by side.
+# Ports differ from Extraction (5432, 6379, 8000), so both run side by side.
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: backend
+      POSTGRES_USER: backend
+      POSTGRES_PASSWORD: backend
+    ports: ["5433:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U backend"]
+      interval: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+
   redis:
     image: redis:7-alpine
     ports: ["6380:6379"]
@@ -18,6 +38,7 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
 
   worker:
     build: .
@@ -26,3 +47,6 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       redis: { condition: service_healthy }
+
+volumes:
+  pgdata:
