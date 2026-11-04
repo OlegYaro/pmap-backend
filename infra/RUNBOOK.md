@@ -32,8 +32,9 @@ The first deploy creates the stack with nothing running, pushes the image, then 
 
 - Backend → extraction: `http://extraction.pmap-dev.internal:8000` with the key of extraction. Extraction
   must be running, otherwise backend answers 502.
-- Clients → gateway: `make gateway` deploys `infra/gateway.yaml` and prints its URL. `/auth/*` needs no
-  token; everything else needs `Authorization: Bearer <access_token>`; `/internal/*` is closed.
+- Clients → gateway: `make gateway` deploys `infra/gateway.yaml` and prints its URL. `/auth/*`, `/docs` and
+  the reads (`GET /transactions`, `/territories`, `/analytics/*`, `/health`) need no token; everything
+  else needs `Authorization: Bearer <access_token>`; `/internal/*` is closed.
 - Gateway → backend: through a VPC link to `backend-api.pmap-dev.internal:8000`; the authorizer calls
   `/internal/users/{id}` there. The JWT secret `pmap/dev/jwt` is copied into the authorizer on deploy:
   after changing it, run `make deploy` and `make gateway`.

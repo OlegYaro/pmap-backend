@@ -186,7 +186,7 @@ Resources:
         overwrite:header.X-Actor-Id: $context.authorizer.user_id
         overwrite:header.X-Actor-Role: $context.authorizer.role
 
-  # Requests without a token (login, refresh, logout): the actor headers are
+  # Requests without a token (auth, docs, public reads): the actor headers are
   # removed.
   PublicIntegration:
     Type: AWS::ApiGatewayV2::Integration
@@ -259,6 +259,48 @@ Resources:
     Properties:
       ApiId: !Ref Api
       RouteKey: GET /openapi.json
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  # Public reads for anonymous consumers (BRD: read-only analytics and
+  # transactions). Exports and /admin still need a token.
+  PublicTransactionsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /transactions
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  PublicTransactionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /transactions/{id}
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  PublicTerritoriesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /territories
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  PublicAnalyticsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /analytics/{proxy+}
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  PublicHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /health
       AuthorizationType: NONE
       Target: !Sub "integrations/${PublicIntegration}"
 

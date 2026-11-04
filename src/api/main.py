@@ -1,7 +1,6 @@
 import taskiq_fastapi
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer
 
 from api.routers.router import api_router
 from core import setup_logging
@@ -10,12 +9,7 @@ from jobs.broker import broker
 
 setup_logging()
 
-# The API Gateway checks the token; this only adds the Authorize button to Swagger.
-app = FastAPI(
-    title="PMAP Backend",
-    dependencies=[Depends(HTTPBearer(auto_error=False))],
-    swagger_ui_parameters={"persistAuthorization": True},
-)
+app = FastAPI(title="PMAP Backend", swagger_ui_parameters={"persistAuthorization": True})
 taskiq_fastapi.init(broker, "api.main:app")
 
 app.include_router(api_router)
