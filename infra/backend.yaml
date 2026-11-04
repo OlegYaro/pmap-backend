@@ -1,0 +1,313 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  PMAP backend service: its own ECR repository and ECS cluster, and two
+  Fargate services built from one image (api, worker), and the S3 bucket for
+  export files. Uses the network stack and Redis of extraction; has no
+  database of its own.
+
+Parameters:
+  Project:
+    Type: String
+    Default: pmap
+  Env:
+    Type: String
+    Default: dev
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Tag of the image in this stack's ECR repository.
+  DesiredCount:
+    Type: Number
+    Default: 0
+    AllowedValues: [0, 1]
+    Description: >-
+      0 = nothing runs (first deploy, before an image exists). 1 = api and
+      worker are running.
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Project}-${Env}-backend"
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  ExportBucket:
+    Type: AWS::S3::Bucket
+    # Kept when the stack is deleted, but removed if the very first creation
+    # of the stack fails, so a retry does not hit "bucket already exists".
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${Project}-${Env}-backend-exports-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${Project}-${Env}-backend"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/ecs/${Project}-${Env}-backend"
+      RetentionInDays: 30
+
+  # Every environment variable of the service is one key of this secret.
+  # To add a variable: add a key here and a line to Secrets in the containers.
+  EnvSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${Project}/${Env}/backend"
+      Description: Environment variables of the backend service
+      SecretString: !Sub
+        - >-
+          {"REDIS_URL": "redis://${RedisHost}:6379/1",
+          "EXTRACTION_URL": "http://extraction.${Namespace}:8000",
+          "EXTRACTION_API_KEY": "{{resolve:secretsmanager:${Project}/${Env}/extraction-api-key}}",
+          "S3_BUCKET": "${ExportBucket}",
+          "S3_REGION": "${AWS::Region}"}
+        # Redis is shared with extraction: database 1 keeps the two TaskIQ
+        # queues apart, otherwise each worker would take the other's tasks.
+        - RedisHost:
+            Fn::ImportValue: !Sub "${Project}-${Env}-RedisHost"
+          Namespace:
+            Fn::ImportValue: !Sub "${Project}-${Env}-NamespaceName"
+
+  # Used by ECS itself: pull the image, write logs, read the secret.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      Policies:
+        - PolicyName: read-env-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref EnvSecret
+
+  # Used by the application code: boto3 gets S3 access from this role.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: exports
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # GetObject too: download links are signed with this role.
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "${ExportBucket.Arn}/*"
+        - PolicyName: ecs-exec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  ApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Project}-${Env}-backend-api"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub "${Repository.RepositoryUri}:${ImageTag}"
+          Essential: true
+          Command: [uvicorn, "api.main:app", --host, 0.0.0.0, --port, "8000"]
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Secrets:
+            - Name: REDIS_URL
+              ValueFrom: !Sub "${EnvSecret}:REDIS_URL::"
+            - Name: EXTRACTION_URL
+              ValueFrom: !Sub "${EnvSecret}:EXTRACTION_URL::"
+            - Name: EXTRACTION_API_KEY
+              ValueFrom: !Sub "${EnvSecret}:EXTRACTION_API_KEY::"
+            - Name: S3_BUCKET
+              ValueFrom: !Sub "${EnvSecret}:S3_BUCKET::"
+            - Name: S3_REGION
+              ValueFrom: !Sub "${EnvSecret}:S3_REGION::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Project}-${Env}-backend-worker"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub "${Repository.RepositoryUri}:${ImageTag}"
+          Essential: true
+          Command: [taskiq, worker, "jobs.broker:broker", jobs.tasks, --workers, "1"]
+          Secrets:
+            - Name: REDIS_URL
+              ValueFrom: !Sub "${EnvSecret}:REDIS_URL::"
+            - Name: EXTRACTION_URL
+              ValueFrom: !Sub "${EnvSecret}:EXTRACTION_URL::"
+            - Name: EXTRACTION_API_KEY
+              ValueFrom: !Sub "${EnvSecret}:EXTRACTION_API_KEY::"
+            - Name: S3_BUCKET
+              ValueFrom: !Sub "${EnvSecret}:S3_BUCKET::"
+            - Name: S3_REGION
+              ValueFrom: !Sub "${EnvSecret}:S3_REGION::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
+  # Registers the running api task in the private DNS namespace as
+  # backend.<namespace>; the gateway will call http://backend.<namespace>:8000.
+  ApiDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: backend
+      NamespaceId:
+        Fn::ImportValue: !Sub "${Project}-${Env}-NamespaceId"
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - Type: A
+            TTL: 10
+
+  # Not open to the internet: the gateway will be the only public entry. Until
+  # then port 8000 is reachable from AdminCidr of the network stack.
+  ApiService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: api
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref ApiTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ApiDiscovery.Arn
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Split
+            - ","
+            - Fn::ImportValue: !Sub "${Project}-${Env}-PublicSubnets"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${Project}-${Env}-BackendSecurityGroup"
+
+  WorkerService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: worker
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref WorkerTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Split
+            - ","
+            - Fn::ImportValue: !Sub "${Project}-${Env}-PublicSubnets"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${Project}-${Env}-BackendSecurityGroup"
+
+Outputs:
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+  ClusterName:
+    Value: !Ref Cluster
+  LogGroupName:
+    Value: !Ref LogGroup
+  EnvSecretArn:
+    Value: !Ref EnvSecret
+  ExportBucketName:
+    Value: !Ref ExportBucket
