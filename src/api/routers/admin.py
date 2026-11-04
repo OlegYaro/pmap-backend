@@ -1,12 +1,13 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
+from api.dependencies import require_admin
 from api.schemas.transactions import TransactionCreate, TransactionResponse, TransactionUpdate
 from integrations.extraction import extraction_http_client
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
 
 @router.get("/runs", status_code=status.HTTP_200_OK)

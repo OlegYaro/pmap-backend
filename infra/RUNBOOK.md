@@ -37,13 +37,7 @@ The first deploy creates the stack with nothing running, pushes the image, then 
 - Gateway → backend: through a VPC link to `backend-api.pmap-dev.internal:8000`; the authorizer calls
   `/internal/users/{id}` there. The JWT secret `pmap/dev/jwt` is copied into the authorizer on deploy:
   after changing it, run `make deploy` and `make gateway`.
-- Directly, from your machine only: set `AdminCidr` of the network stack (extraction repo) to your IP.
-
-  ```bash
-  aws cloudformation deploy --stack-name pmap-dev-network --template-file infra/network.yaml \
-    --parameter-overrides AdminCidr="$(curl -s https://checkip.amazonaws.com)/32"   # in the extraction repo
-  make aws-api-url      # http://<ip>:8000, changes after every deploy
-  ```
+- Port 8000 is never open to the internet (`network.yaml` of extraction has no rule for it): use the gateway.
 
 - New extraction key: the backend secret copies it on a stack update, so redeploy backend after it.
 

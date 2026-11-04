@@ -244,6 +244,24 @@ Resources:
       AuthorizationType: NONE
       Target: !Sub "integrations/${PublicIntegration}"
 
+  # Swagger needs no token to open; requests made from it carry the token
+  # entered under Authorize.
+  DocsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /docs
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  OpenApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /openapi.json
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
   # /internal is for the authorizer only. AWS_IAM refuses every unsigned
   # request, so it is closed from the internet.
   InternalRoute:
