@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   PMAP backend service: its own ECR repository and ECS cluster, and two
-  Fargate services built from one image (api, worker), and the S3 bucket for
-  export files. Uses the network stack and Redis of extraction; has no
-  database of its own.
+  Fargate services built from one image (api, worker), the S3 bucket for
+  export files and the secret that signs the tokens. Uses the network stack,
+  Redis and the RDS instance of extraction (its own database "backend").
 
 Parameters:
   Project:
@@ -95,7 +95,8 @@ Resources:
       Description: Environment variables of the backend service
       SecretString: !Sub
         - >-
-          {"REDIS_URL": "redis://${RedisHost}:6379/1",
+          {"DB_URL": "postgresql+asyncpg://{{resolve:secretsmanager:${MasterSecretArn}:SecretString:username}}:{{resolve:secretsmanager:${MasterSecretArn}:SecretString:password}}@${DbHost}:5432/backend",
+          "REDIS_URL": "redis://${RedisHost}:6379/1",
           "EXTRACTION_URL": "http://extraction.${Namespace}:8000",
           "EXTRACTION_API_KEY": "{{resolve:secretsmanager:${Project}/${Env}/extraction-api-key}}",
           "S3_BUCKET": "${ExportBucket}",
@@ -104,10 +105,24 @@ Resources:
         # queues apart, otherwise each worker would take the other's tasks.
         - RedisHost:
             Fn::ImportValue: !Sub "${Project}-${Env}-RedisHost"
+          MasterSecretArn:
+            Fn::ImportValue: !Sub "${Project}-${Env}-DbMasterSecretArn"
+          DbHost:
+            Fn::ImportValue: !Sub "${Project}-${Env}-DbHost"
           Namespace:
             Fn::ImportValue: !Sub "${Project}-${Env}-NamespaceName"
 
-  # Used by ECS itself: pull the image, write logs, read the secret.
+  # Signs the access tokens. Read by the api and by the gateway authorizer.
+  JwtSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${Project}/${Env}/jwt"
+      Description: HS256 key of the backend access tokens
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  # Used by ECS itself: pull the image, write logs, read the secrets.
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -127,7 +142,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Ref EnvSecret
+                Resource:
+                  - !Ref EnvSecret
+                  - !Ref JwtSecret
 
   # Used by the application code: boto3 gets S3 access from this role.
   TaskRole:
@@ -185,6 +202,10 @@ Resources:
             - ContainerPort: 8000
               Protocol: tcp
           Secrets:
+            - Name: DB_URL
+              ValueFrom: !Sub "${EnvSecret}:DB_URL::"
+            - Name: JWT_SECRET
+              ValueFrom: !Ref JwtSecret
             - Name: REDIS_URL
               ValueFrom: !Sub "${EnvSecret}:REDIS_URL::"
             - Name: EXTRACTION_URL
@@ -221,6 +242,10 @@ Resources:
           Essential: true
           Command: [taskiq, worker, "jobs.broker:broker", jobs.tasks, --workers, "1"]
           Secrets:
+            - Name: DB_URL
+              ValueFrom: !Sub "${EnvSecret}:DB_URL::"
+            - Name: JWT_SECRET
+              ValueFrom: !Ref JwtSecret
             - Name: REDIS_URL
               ValueFrom: !Sub "${EnvSecret}:REDIS_URL::"
             - Name: EXTRACTION_URL
@@ -239,11 +264,14 @@ Resources:
               awslogs-stream-prefix: worker
 
   # Registers the running api task in the private DNS namespace as
-  # backend.<namespace>; the gateway will call http://backend.<namespace>:8000.
+  # backend-api.<namespace>. The A record is for the gateway authorizer
+  # (http://backend-api.<namespace>:8000); the SRV record gives API Gateway the
+  # port. A record type cannot change in place, so this replaced the old
+  # "backend" service.
   ApiDiscovery:
     Type: AWS::ServiceDiscovery::Service
     Properties:
-      Name: backend
+      Name: backend-api
       NamespaceId:
         Fn::ImportValue: !Sub "${Project}-${Env}-NamespaceId"
       DnsConfig:
@@ -251,9 +279,11 @@ Resources:
         DnsRecords:
           - Type: A
             TTL: 10
+          - Type: SRV
+            TTL: 10
 
-  # Not open to the internet: the gateway will be the only public entry. Until
-  # then port 8000 is reachable from AdminCidr of the network stack.
+  # Not open to the internet: the gateway (infra/gateway.yaml) is the public
+  # entry. Port 8000 is also reachable from AdminCidr of the network stack.
   ApiService:
     Type: AWS::ECS::Service
     Properties:
@@ -265,6 +295,8 @@ Resources:
       EnableExecuteCommand: true
       ServiceRegistries:
         - RegistryArn: !GetAtt ApiDiscovery.Arn
+          ContainerName: app
+          ContainerPort: 8000
       DeploymentConfiguration:
         DeploymentCircuitBreaker:
           Enable: true
@@ -311,3 +343,7 @@ Outputs:
     Value: !Ref EnvSecret
   ExportBucketName:
     Value: !Ref ExportBucket
+  ApiDiscoveryArn:
+    Value: !GetAtt ApiDiscovery.Arn
+    Export:
+      Name: !Sub "${Project}-${Env}-BackendApiDiscoveryArn"

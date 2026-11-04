@@ -1,8 +1,9 @@
 # Runbook: backend on AWS (dev)
 
-Stack `pmap-dev-backend` (`infra/backend.yaml`), region `eu-north-1`. It uses the stacks of extraction:
-`pmap-dev-network` (VPC, security group, `pmap-dev.internal`), `pmap-dev-data` (Redis) and
-`pmap-dev-extraction` (its API key). Deploy extraction first. Run everything from the repo root.
+Stacks `pmap-dev-backend` (`infra/backend.yaml`) and `pmap-dev-gateway` (`infra/gateway.yaml`), region
+`eu-north-1`. They use the stacks of extraction: `pmap-dev-network` (VPC, security group,
+`pmap-dev.internal`), `pmap-dev-data` (RDS, Redis) and `pmap-dev-extraction` (its API key). Deploy
+extraction first. Run everything from the repo root.
 
 ## 1. Deploy main by hand
 
@@ -13,12 +14,17 @@ make deploy
 make aws-check
 ```
 
-`deploy` = image of HEAD (tag = short commit, built once) → stack update with api and worker running.
+`deploy` = image of HEAD (tag = short commit, built once) → stack update with nothing running →
+`alembic upgrade head` as a one-off task → api and worker running.
 The first deploy creates the stack with nothing running, pushes the image, then starts both services.
 
 - Remove `AWS_...` lines from `.env` before deploying by hand: make exports `.env`, and expired keys there
   override `aws login`.
-- No migrations: backend has no database. Redis database 1 keeps its queue apart from extraction's (0).
+- Database `backend` on the RDS instance of extraction, same master user. Create it once before the first
+  deploy, through the tunnel of extraction (`make tunnel-db` in the extraction repo):
+  `psql "postgresql://pmap_admin@127.0.0.1:15432/extraction?sslmode=require" -c 'CREATE DATABASE backend'`.
+- Users: `make aws-create-user LOGIN=admin` (asks for the password; `ROLE=user` for a plain user).
+- Redis database 1 keeps its queue apart from extraction's (0).
 - Exports go to the stack's own bucket `pmap-dev-backend-exports-<account>`; download links are valid for an hour.
   For local tests after the first deploy: `S3_BUCKET` in `.env` = output `ExportBucketName` of the stack.
 
@@ -26,9 +32,12 @@ The first deploy creates the stack with nothing running, pushes the image, then 
 
 - Backend → extraction: `http://extraction.pmap-dev.internal:8000` with the key of extraction. Extraction
   must be running, otherwise backend answers 502.
-- Gateway → backend: `http://backend.pmap-dev.internal:8000`. Port 8000 is not open to the internet:
-  the gateway will be the only public entry.
-- Until then, from your machine only: set `AdminCidr` of the network stack (extraction repo) to your IP.
+- Clients → gateway: `make gateway` deploys `infra/gateway.yaml` and prints its URL. `/auth/*` needs no
+  token; everything else needs `Authorization: Bearer <access_token>`; `/internal/*` is closed.
+- Gateway → backend: through a VPC link to `backend-api.pmap-dev.internal:8000`; the authorizer calls
+  `/internal/users/{id}` there. The JWT secret `pmap/dev/jwt` is copied into the authorizer on deploy:
+  after changing it, run `make deploy` and `make gateway`.
+- Directly, from your machine only: set `AdminCidr` of the network stack (extraction repo) to your IP.
 
   ```bash
   aws cloudformation deploy --stack-name pmap-dev-network --template-file infra/network.yaml \
