@@ -9,7 +9,7 @@ from jobs.broker import broker
 
 setup_logging()
 
-app = FastAPI(title="PMAP Backend")
+app = FastAPI(title="PMAP Backend", swagger_ui_parameters={"persistAuthorization": True})
 taskiq_fastapi.init(broker, "api.main:app")
 
 app.include_router(api_router)

@@ -17,6 +17,8 @@ jobs:
     env:
       REDIS_URL: redis://localhost:6379/0
       EXTRACTION_API_KEY: test-key
+      DB_URL: postgresql+asyncpg://test:test@localhost:5432/test
+      JWT_SECRET: test-secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
