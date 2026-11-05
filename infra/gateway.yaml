@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  PMAP gateway: the public HTTP API in front of the backend. A Lambda
+  authorizer checks the access token and asks the backend whether its user
+  exists; API Gateway then passes the request to the backend api through a VPC
+  link, with the user id and role in X-Actor-Id and X-Actor-Role. Deploy the
+  backend stack first.
+
+Parameters:
+  Project:
+    Type: String
+    Default: pmap
+  Env:
+    Type: String
+    Default: dev
+
+Resources:
+  # The authorizer and the VPC link sit in the private subnets: they only talk
+  # to the backend inside the VPC.
+  AuthorizerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Gateway authorizer Lambda
+      VpcId:
+        Fn::ImportValue: !Sub "${Project}-${Env}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Project}-${Env}-gateway-authorizer"
+
+  VpcLinkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Gateway VPC link
+      VpcId:
+        Fn::ImportValue: !Sub "${Project}-${Env}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Project}-${Env}-gateway-vpc-link"
+
+  BackendFromAuthorizer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub "${Project}-${Env}-BackendSecurityGroup"
+      Description: Gateway authorizer checks users
+      IpProtocol: tcp
+      FromPort: 8000
+      ToPort: 8000
+      SourceSecurityGroupId: !Ref AuthorizerSecurityGroup
+
+  BackendFromVpcLink:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub "${Project}-${Env}-BackendSecurityGroup"
+      Description: Gateway passes requests to the backend
+      IpProtocol: tcp
+      FromPort: 8000
+      ToPort: 8000
+      SourceSecurityGroupId: !Ref VpcLinkSecurityGroup
+
+  AuthorizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Logs and the network interfaces a Lambda in a VPC needs.
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+
+  # Checks the HS256 signature and expiry of the token, then asks the backend
+  # whether the user exists and is active. The role comes from the backend,
+  # not from the token. Any error means deny.
+  AuthorizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Project}-${Env}-gateway-authorizer"
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt AuthorizerRole.Arn
+      Timeout: 5
+      MemorySize: 128
+      VpcConfig:
+        SubnetIds: !Split
+          - ","
+          - Fn::ImportValue: !Sub "${Project}-${Env}-PrivateSubnets"
+        SecurityGroupIds:
+          - !Ref AuthorizerSecurityGroup
+      Environment:
+        Variables:
+          # Resolved at deploy time: the private subnets have no route to
+          # Secrets Manager. Redeploy this stack after the secret changes.
+          JWT_SECRET: !Sub "{{resolve:secretsmanager:${Project}/${Env}/jwt}}"
+          BACKEND_URL: !Sub
+            - "http://backend-api.${Namespace}:8000"
+            - Namespace:
+                Fn::ImportValue: !Sub "${Project}-${Env}-NamespaceName"
+      Code:
+        ZipFile: |
+          import base64
+          import hashlib
+          import hmac
+          import json
+          import os
+          import time
+          import urllib.request
+
+          SECRET = os.environ["JWT_SECRET"].encode()
+          BACKEND_URL = os.environ["BACKEND_URL"]
+          DENY = {"isAuthorized": False}
+
+
+          def b64decode(part):
+              return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+
+          def token_claims(token):
+              """Claims of a valid, unexpired HS256 token, or None."""
+              try:
+                  header, payload, signature = token.split(".")
+                  if json.loads(b64decode(header))["alg"] != "HS256":
+                      return None
+                  signed = f"{header}.{payload}".encode()
+                  expected = hmac.new(SECRET, signed, hashlib.sha256).digest()
+                  if not hmac.compare_digest(expected, b64decode(signature)):
+                      return None
+                  claims = json.loads(b64decode(payload))
+                  return claims if claims["exp"] > time.time() else None
+              except Exception:
+                  return None
+
+
+          def handler(event, context):
+              scheme, _, token = (event.get("headers") or {}).get("authorization", "").partition(" ")
+              claims = token_claims(token) if scheme.lower() == "bearer" else None
+              if claims is None:
+                  return DENY
+              try:
+                  url = f"{BACKEND_URL}/internal/users/{int(claims['sub'])}"
+                  with urllib.request.urlopen(url, timeout=3) as response:
+                      user = json.load(response)
+              except Exception:
+                  return DENY
+              if not user.get("is_active"):
+                  return DENY
+              return {
+                  "isAuthorized": True,
+                  "context": {"user_id": str(user["id"]), "role": user["role"]},
+              }
+
+  Api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${Project}-${Env}-gateway"
+      ProtocolType: HTTP
+
+  VpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: !Sub "${Project}-${Env}-gateway"
+      SubnetIds: !Split
+        - ","
+        - Fn::ImportValue: !Sub "${Project}-${Env}-PrivateSubnets"
+      SecurityGroupIds:
+        - !Ref VpcLinkSecurityGroup
+
+  # Requests that passed the authorizer. The actor headers are always set from
+  # the authorizer, so a client cannot send its own.
+  BackendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref VpcLink
+      IntegrationUri:
+        Fn::ImportValue: !Sub "${Project}-${Env}-BackendApiDiscoveryArn"
+      PayloadFormatVersion: "1.0"
+      RequestParameters:
+        overwrite:header.X-Actor-Id: $context.authorizer.user_id
+        overwrite:header.X-Actor-Role: $context.authorizer.role
+
+  # Requests without a token (auth, docs, public reads): the actor headers are
+  # removed.
+  PublicIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref VpcLink
+      IntegrationUri:
+        Fn::ImportValue: !Sub "${Project}-${Env}-BackendApiDiscoveryArn"
+      PayloadFormatVersion: "1.0"
+      RequestParameters:
+        remove:header.X-Actor-Id: "''"
+        remove:header.X-Actor-Role: "''"
+
+  # The result is cached per token for 5 minutes: a deactivated user is
+  # refused at the latest 5 minutes later.
+  Authorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref Api
+      Name: token
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerFunction.Arn}/invocations"
+      AuthorizerPayloadFormatVersion: "2.0"
+      EnableSimpleResponses: true
+      IdentitySource:
+        - $request.header.Authorization
+      AuthorizerResultTtlInSeconds: 300
+
+  AuthorizerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AuthorizerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/authorizers/${Authorizer}"
+
+  # Everything else needs a valid token.
+  ProtectedRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: ANY /{proxy+}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref Authorizer
+      Target: !Sub "integrations/${BackendIntegration}"
+
+  AuthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: ANY /auth/{proxy+}
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  # Swagger needs no token to open; requests made from it carry the token
+  # entered under Authorize.
+  DocsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /docs
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  OpenApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /openapi.json
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  # Public reads for anonymous consumers (BRD: read-only analytics and
+  # transactions). Exports and /admin still need a token.
+  PublicTransactionsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /transactions
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  PublicTransactionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /transactions/{id}
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  PublicTerritoriesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /territories
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  PublicAnalyticsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /analytics/{proxy+}
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  PublicHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /health
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  # /internal is for the authorizer only. AWS_IAM refuses every unsigned
+  # request, so it is closed from the internet.
+  InternalRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: ANY /internal/{proxy+}
+      AuthorizationType: AWS_IAM
+      Target: !Sub "integrations/${PublicIntegration}"
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref Api
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 20
+
+Outputs:
+  ApiUrl:
+    Value: !GetAtt Api.ApiEndpoint

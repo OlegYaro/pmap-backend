@@ -1,13 +1,14 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
+from api.dependencies import bearer
 from api.schemas.transactions import TransactionFilters
 from core.storage import storage
 from jobs.broker import broker
 from jobs.tasks import export_transactions
 
-router = APIRouter(tags=["exports"])
+router = APIRouter(tags=["exports"], dependencies=[Depends(bearer)])
 
 
 @router.post("/exports", status_code=status.HTTP_202_ACCEPTED)
